@@ -275,34 +275,6 @@ function Run-CleanupLoop {
             $backupCreated = $true
         }
 
-        # Build the Claude Code prompt - tell Claude to edit the _cleaned copy
-        $prompt = @"
-You have the tableau-cleanup skill. FIRST, read the skill file at:
-C:\Users\$env:USERNAME\.claude\skills\tableau-cleanup\SKILL.md
-
-Pay special attention to the "What You CAN and CANNOT Edit" section.
-
-WORKBOOK TO EDIT: $cleanedPath
-
-CRITICAL SAFETY RULES - DO NOT VIOLATE:
-1. NEVER add formula attributes to bin/group calculations (class='categorical-bin' or 'quantitative-bin')
-2. NEVER double-encode ampersands (&amp; should stay &amp;, NOT become &amp;amp;)
-3. NEVER remove &#13;&#10; from formulas - these are valid XML newlines
-4. NEVER modify calculations that have no formula attribute
-5. NEVER change the name attribute on any element
-6. If validator reports errors you cannot fix safely, STOP and report them - do not force bad fixes
-
-IMPORTANT RULES:
-- Store ALL scripts you create in: .cleanup helpers/
-- Use Python for bulk fixes (captions, folders)
-- Use Edit tool for comments (requires understanding each formula)
-- Follow the EXACT 6 folder names from the skill
-- Use HTML entity codes (&#x1F4CA;), NOT raw emojis
-- The _cleaned copy has been created for you - edit ONLY this file
-
-Run validate_cleanup.py after fixes. Stop when 0 errors remain.
-"@
-
         # PHASE 1: Check current state
         Write-Step "PHASE: Checking current errors..."
 
@@ -340,6 +312,65 @@ Run validate_cleanup.py after fixes. Stop when 0 errors remain.
             Write-Status "Install skill files first: run install.bat"
             break
         }
+
+        # Build error summary for the prompt (now we have actual $currentErrors)
+        $errorList = @()
+        if ($currentErrors.Caption -gt 0) { $errorList += "$($currentErrors.Caption) caption errors (naming issues)" }
+        if ($currentErrors.Comment -gt 0) { $errorList += "$($currentErrors.Comment) comment errors (missing/lazy comments)" }
+        if ($currentErrors.Folder -gt 0) { $errorList += "$($currentErrors.Folder) folder errors (organization)" }
+        if ($currentErrors.XML -gt 0) { $errorList += "$($currentErrors.XML) XML errors (syntax)" }
+        $errorSummary = if ($errorList.Count -gt 0) { $errorList -join "`n- " } else { "Check validation output above" }
+
+        # IMPORTANT: Prompt uses trigger words that MATCH the Skill description
+        # This triggers the Skill AUTOMATICALLY - we don't tell Claude to read files
+        $prompt = @"
+Clean up this Tableau workbook by standardizing captions, adding comments, and organizing calculations into folders.
+
+WORKBOOK PATH: $cleanedPath
+
+VALIDATION FOUND $($currentErrors.Total) ERRORS:
+- $errorSummary
+
+TWO-LAYER VALIDATION:
+1. SCRIPT validation catches obvious issues (too short, lazy patterns)
+2. YOU must also validate - review ALL comments for quality, even "passing" ones
+
+Use batch processing (scripts/batch_comments.py) to process ALL calculations in groups of 10.
+
+FOR EACH CALCULATION:
+1. READ the formula completely to understand what it does
+2. UNDERSTAND its business purpose (KPI tracking? Filtering? Display?)
+3. CHECK the existing comment (if any)
+4. ASK: Would a new team member understand WHY this calc exists?
+5. DECIDE: Add / Revise / Keep based on YOUR judgment + script rules
+
+COMMENT WORKFLOW:
+- NO COMMENT? → Add meaningful comment explaining PURPOSE
+- SCRIPT FLAGGED (M3 error)? → MUST fix - explain PURPOSE
+- SCRIPT PASSED but vague? → YOU should still improve it!
+- GOOD COMMENT (specific, explains why)? → Keep it
+
+WHAT MAKES A GOOD COMMENT:
+- Explains WHY this calc exists (not just what it does)
+- Specific to this formula (not generic)
+- Would help a new team member understand the business purpose
+- 15+ characters, not lazy patterns
+
+EXAMPLES:
+BAD (even if passes script): "// This calculation is used for tracking"
+GOOD: "// Identifies stale accounts needing follow-up for retention"
+
+BAD: "// Returns a value based on the date"
+GOOD: "// Converts fiscal year (July start) for financial reporting alignment"
+
+SAFETY RULES:
+- NEVER change name attributes, only caption
+- NEVER add formula to bin/group calculations
+- Keep &#13;&#10; in formulas (valid XML newlines)
+- Edit ONLY the _cleaned file at the path above
+
+Run validation after fixes. Continue until 0 errors AND you've reviewed all calcs.
+"@
 
         # PHASE 2: Ask Claude to fix
         Write-Step "PHASE: Asking Claude to fix errors..."
