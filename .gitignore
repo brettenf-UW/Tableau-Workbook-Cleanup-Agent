@@ -1,0 +1,28 @@
+# Claude Code local settings (contains user-specific paths)
+.claude/settings.local.json
+
+# Internal presentations
+Slides/
+
+# Tableau workbooks (may contain client data)
+*.twb
+*.twbx
+
+# Backup files
+*_backup/
+*_cleaned.twb
+*_cleaned.twbx
+
+# Log files
+*.log
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Temp files
+*.tmp
+~$*
