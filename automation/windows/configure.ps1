@@ -1,4 +1,4 @@
-# Tableau Cleanup Agent - Configuration Script
+# Tableau Workbook Scrubber - Configuration Script
 # Manage multiple folders with individual schedules
 
 param(
@@ -11,6 +11,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Import shared UI functions
+. "$PSScriptRoot\lib\ui-helpers.ps1"
 
 # Configuration file path
 $ConfigDir = Join-Path $env:USERPROFILE ".iw-tableau-cleanup"
@@ -80,85 +83,45 @@ function Save-Configuration {
     }
 
     $Config | ConvertTo-Json -Depth 10 | Set-Content $ConfigFile
-    Write-Host "Configuration saved." -ForegroundColor Green
+    Write-Good "Configuration saved"
 }
 
-function Show-FolderList {
-    param($Config)
-
-    Write-Host ""
-    Write-Host "Configured Folders:" -ForegroundColor Cyan
-    Write-Host "===================" -ForegroundColor Cyan
-
-    if ($Config.folders.Count -eq 0) {
-        Write-Host "  (none configured)" -ForegroundColor Gray
-        return
-    }
-
-    $i = 1
-    foreach ($folder in $Config.folders) {
-        $status = if ($folder.enabled) { "[ON]" } else { "[OFF]" }
-        $statusColor = if ($folder.enabled) { "Green" } else { "DarkGray" }
-
-        Write-Host ""
-        Write-Host "  $i. $($folder.name)" -ForegroundColor White
-        Write-Host "     Status:   " -NoNewline; Write-Host $status -ForegroundColor $statusColor
-        Write-Host "     Path:     $($folder.path)" -ForegroundColor Gray
-        Write-Host "     Schedule: $($folder.schedule)" -ForegroundColor Gray
-        if ($folder.backup_folder) {
-            Write-Host "     Backup:   $($folder.backup_folder)" -ForegroundColor Gray
-        }
-        if ($folder.last_run) {
-            Write-Host "     Last Run: $($folder.last_run)" -ForegroundColor DarkGray
-        }
-        $i++
-    }
-    Write-Host ""
-}
+# Note: Using Show-FolderList from ui-helpers.ps1
 
 function Add-Folder {
     param($Config)
 
-    Write-Host ""
-    Write-Host "Add New Folder" -ForegroundColor Cyan
-    Write-Host "==============" -ForegroundColor Cyan
-    Write-Host ""
+    Write-SubHeader "Add New Folder"
 
     # Get folder path
-    Write-Host "Select the folder containing Tableau workbooks..." -ForegroundColor Yellow
+    Write-Step "Select the folder containing Tableau workbooks..."
     $path = Show-FolderBrowserDialog -Description "Select folder with Tableau workbooks"
 
     if (-not $path) {
-        Write-Host "Cancelled." -ForegroundColor Yellow
+        Write-Bad "Cancelled"
         return $Config
     }
 
-    Write-Host "  Path: $path" -ForegroundColor Green
+    Write-Good "Selected: $path"
 
     # Get friendly name
     $defaultName = Split-Path $path -Leaf
-    $name = Read-Host "Enter a friendly name [$defaultName]"
-    if ([string]::IsNullOrWhiteSpace($name)) {
-        $name = $defaultName
-    }
+    $name = Get-UserChoice -Prompt "Enter a friendly name:" -Default $defaultName
 
     # Get schedule time
-    $schedule = Read-Host "Enter daily schedule time (HH:MM) [17:00]"
-    if ([string]::IsNullOrWhiteSpace($schedule)) {
-        $schedule = "17:00"
-    }
+    $schedule = Get-UserChoice -Prompt "Enter daily schedule time (HH:MM):" -Default "17:00"
 
     # Validate time format
     if ($schedule -notmatch '^\d{1,2}:\d{2}$') {
-        Write-Host "Invalid time format. Using 17:00" -ForegroundColor Yellow
+        Write-Bad "Invalid time format. Using 17:00"
         $schedule = "17:00"
     }
 
     # Ask about backup folder
-    $useCustomBackup = Read-Host "Use custom backup folder? (y/N)"
-    $backupFolder = $null
-    if ($useCustomBackup -eq "y" -or $useCustomBackup -eq "Y") {
+    if (Get-UserConfirmation -Prompt "Use custom backup folder?") {
         $backupFolder = Show-FolderBrowserDialog -Description "Select backup folder"
+    } else {
+        $backupFolder = $null
     }
 
     # Create new folder entry
@@ -175,10 +138,10 @@ function Add-Folder {
     $Config.folders += $newFolder
 
     Write-Host ""
-    Write-Host "Folder added:" -ForegroundColor Green
-    Write-Host "  Name:     $name"
-    Write-Host "  Path:     $path"
-    Write-Host "  Schedule: $schedule"
+    Write-Good "Folder added"
+    Write-Status "Name:     $name"
+    Write-Status "Path:     $path"
+    Write-Status "Schedule: $schedule"
 
     return $Config
 }
@@ -187,65 +150,62 @@ function Edit-Folder {
     param($Config)
 
     if ($Config.folders.Count -eq 0) {
-        Write-Host "No folders configured." -ForegroundColor Yellow
+        Write-Bad "No folders configured"
         return $Config
     }
 
+    Write-SubHeader "Configured Folders"
     Show-FolderList -Config $Config
 
-    $selection = Read-Host "Enter folder number to edit"
+    $selection = Get-UserChoice -Prompt "Enter folder number to edit:"
     $index = [int]$selection - 1
 
     if ($index -lt 0 -or $index -ge $Config.folders.Count) {
-        Write-Host "Invalid selection." -ForegroundColor Red
+        Write-Fail "Invalid selection"
         return $Config
     }
 
     $folder = $Config.folders[$index]
 
-    Write-Host ""
-    Write-Host "Editing: $($folder.name)" -ForegroundColor Cyan
-    Write-Host "Press Enter to keep current value" -ForegroundColor Gray
-    Write-Host ""
+    Write-SubHeader "Editing: $($folder.name)"
+    Write-Status "Press Enter to keep current value"
 
     # Edit name
-    $newName = Read-Host "Name [$($folder.name)]"
-    if (-not [string]::IsNullOrWhiteSpace($newName)) {
-        $folder.name = $newName
-    }
+    $newName = Get-UserChoice -Prompt "Name:" -Default $folder.name
+    $folder.name = $newName
 
     # Edit schedule
-    $newSchedule = Read-Host "Schedule [$($folder.schedule)]"
-    if (-not [string]::IsNullOrWhiteSpace($newSchedule)) {
-        if ($newSchedule -match '^\d{1,2}:\d{2}$') {
-            $folder.schedule = $newSchedule
-        } else {
-            Write-Host "Invalid time format, keeping current." -ForegroundColor Yellow
+    $newSchedule = Get-UserChoice -Prompt "Schedule (HH:MM):" -Default $folder.schedule
+    if ($newSchedule -match '^\d{1,2}:\d{2}$') {
+        $folder.schedule = $newSchedule
+    } else {
+        Write-Bad "Invalid time format, keeping current"
+    }
+
+    # Toggle enabled - use clear language
+    if ($folder.enabled) {
+        if (Get-UserConfirmation -Prompt "Disable this folder?") {
+            $folder.enabled = $false
+            Write-Good "Folder disabled"
+        }
+    } else {
+        if (Get-UserConfirmation -Prompt "Enable this folder?" -DefaultYes $true) {
+            $folder.enabled = $true
+            Write-Good "Folder enabled"
         }
     }
 
-    # Toggle enabled
-    $currentStatus = if ($folder.enabled) { "enabled" } else { "disabled" }
-    $toggleEnabled = Read-Host "Currently $currentStatus. Toggle? (y/N)"
-    if ($toggleEnabled -eq "y" -or $toggleEnabled -eq "Y") {
-        $folder.enabled = -not $folder.enabled
-        $newStatus = if ($folder.enabled) { "enabled" } else { "disabled" }
-        Write-Host "  Now $newStatus" -ForegroundColor Green
-    }
-
     # Edit path
-    $changePath = Read-Host "Change folder path? (y/N)"
-    if ($changePath -eq "y" -or $changePath -eq "Y") {
+    if (Get-UserConfirmation -Prompt "Change folder path?") {
         $newPath = Show-FolderBrowserDialog -Description "Select new folder path"
         if ($newPath) {
             $folder.path = $newPath
-            Write-Host "  Path updated to: $newPath" -ForegroundColor Green
+            Write-Good "Path updated: $newPath"
         }
     }
 
     $Config.folders[$index] = $folder
-    Write-Host ""
-    Write-Host "Folder updated." -ForegroundColor Green
+    Write-Good "Folder updated"
 
     return $Config
 }
@@ -254,28 +214,28 @@ function Remove-Folder {
     param($Config)
 
     if ($Config.folders.Count -eq 0) {
-        Write-Host "No folders configured." -ForegroundColor Yellow
+        Write-Bad "No folders configured"
         return $Config
     }
 
+    Write-SubHeader "Configured Folders"
     Show-FolderList -Config $Config
 
-    $selection = Read-Host "Enter folder number to remove"
+    $selection = Get-UserChoice -Prompt "Enter folder number to remove:"
     $index = [int]$selection - 1
 
     if ($index -lt 0 -or $index -ge $Config.folders.Count) {
-        Write-Host "Invalid selection." -ForegroundColor Red
+        Write-Fail "Invalid selection"
         return $Config
     }
 
     $folder = $Config.folders[$index]
-    $confirm = Read-Host "Remove '$($folder.name)'? (y/N)"
 
-    if ($confirm -eq "y" -or $confirm -eq "Y") {
+    if (Get-UserConfirmation -Prompt "Remove '$($folder.name)'?") {
         $Config.folders = @($Config.folders | Where-Object { $_ -ne $folder })
-        Write-Host "Folder removed." -ForegroundColor Green
+        Write-Good "Folder removed"
     } else {
-        Write-Host "Cancelled." -ForegroundColor Yellow
+        Write-Bad "Cancelled"
     }
 
     return $Config
@@ -284,22 +244,21 @@ function Remove-Folder {
 function Show-Menu {
     param($Config)
 
-    Write-Host ""
-    Write-Host "======================================" -ForegroundColor Cyan
-    Write-Host "  Tableau Cleanup Agent - Setup" -ForegroundColor Cyan
-    Write-Host "======================================" -ForegroundColor Cyan
+    Clear-Host
+    Show-Banner -Compact
 
+    Write-Header "Folder Configuration"
     Show-FolderList -Config $Config
 
-    Write-Host "Actions:" -ForegroundColor Yellow
-    Write-Host "  1. Add folder"
-    Write-Host "  2. Edit folder"
-    Write-Host "  3. Remove folder"
-    Write-Host "  4. Save and exit"
-    Write-Host "  5. Exit without saving"
-    Write-Host ""
+    Show-MenuBox -Title "Actions" -Options @(
+        @{ Key = "1"; Label = "Add folder"; Desc = "Add a new watch folder" }
+        @{ Key = "2"; Label = "Edit folder"; Desc = "Modify an existing folder" }
+        @{ Key = "3"; Label = "Remove folder"; Desc = "Delete a folder" }
+        @{ Key = "4"; Label = "Save and exit"; Desc = "Save changes and return" }
+        @{ Key = "5"; Label = "Exit"; Desc = "Discard changes" }
+    )
 
-    return Read-Host "Select action"
+    return Get-UserChoice -Prompt "Select [1-5]:"
 }
 
 # Main flow
@@ -310,7 +269,7 @@ if ($Silent -or $Action) {
     switch ($Action) {
         "add" {
             if (-not $FolderPath -or -not (Test-Path $FolderPath)) {
-                Write-Host "Error: Valid -FolderPath required" -ForegroundColor Red
+                Write-Fail "Error: Valid -FolderPath required"
                 exit 1
             }
             $newFolder = @{
@@ -323,22 +282,24 @@ if ($Silent -or $Action) {
             }
             $config.folders += $newFolder
             Save-Configuration -Config $config
-            Write-Host "Folder added: $($newFolder.name)" -ForegroundColor Green
+            Write-Good "Folder added: $($newFolder.name)"
         }
         "list" {
+            Show-Banner -Compact
+            Write-Header "Configured Folders"
             Show-FolderList -Config $config
         }
         "remove" {
             if (-not $FolderName) {
-                Write-Host "Error: -FolderName required" -ForegroundColor Red
+                Write-Fail "Error: -FolderName required"
                 exit 1
             }
             $config.folders = @($config.folders | Where-Object { $_.name -ne $FolderName })
             Save-Configuration -Config $config
-            Write-Host "Folder removed: $FolderName" -ForegroundColor Green
+            Write-Good "Folder removed: $FolderName"
         }
         default {
-            Write-Host "Unknown action. Use: add, list, remove" -ForegroundColor Red
+            Write-Fail "Unknown action. Use: add, list, remove"
             exit 1
         }
     }
@@ -355,38 +316,41 @@ while ($true) {
         "1" {
             $config = Add-Folder -Config $config
             $modified = $true
+            Start-Sleep -Seconds 1
         }
         "2" {
             $config = Edit-Folder -Config $config
             $modified = $true
+            Start-Sleep -Seconds 1
         }
         "3" {
             $config = Remove-Folder -Config $config
             $modified = $true
+            Start-Sleep -Seconds 1
         }
         "4" {
             Save-Configuration -Config $config
+            Show-Success -Title "Configuration Saved" -Stats @{
+                "Folders" = $config.folders.Count
+            }
             Write-Host ""
-            Write-Host "Configuration saved!" -ForegroundColor Green
-            Write-Host ""
-            Write-Host "Next steps:" -ForegroundColor Yellow
-            Write-Host "  1. Run 'install-schedule.ps1' to create scheduled tasks"
-            Write-Host "  2. Or run 'run-cleanup.ps1' to test manually"
+            Write-Info "Next: Run 'tableau-scrubber' to clean workbooks"
+            Write-Info "Or select 'Manage Schedules' to automate"
             Write-Host ""
             exit 0
         }
         "5" {
             if ($modified) {
-                $confirm = Read-Host "Discard changes? (y/N)"
-                if ($confirm -ne "y" -and $confirm -ne "Y") {
+                if (-not (Get-UserConfirmation -Prompt "Discard changes?")) {
                     continue
                 }
             }
-            Write-Host "Exiting without saving." -ForegroundColor Yellow
+            Write-Bad "Exiting without saving"
             exit 0
         }
         default {
-            Write-Host "Invalid selection." -ForegroundColor Red
+            Write-Fail "Invalid selection"
+            Start-Sleep -Seconds 1
         }
     }
 }

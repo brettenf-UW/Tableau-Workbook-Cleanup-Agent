@@ -17,11 +17,6 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-# Fix Windows console encoding for emoji/Unicode output
-if sys.platform == 'win32':
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-
 # Acronyms to preserve (must stay uppercase)
 ACRONYMS = {'ID', 'YTD', 'MTD', 'QTD', 'KPI', 'ROI', 'YOY', 'MOM', 'WOW',
             'LOD', 'RLS', 'API', 'URL', 'SQL', 'AVG', 'SUM', 'MIN', 'MAX'}
@@ -37,16 +32,16 @@ FOLDER_CATEGORIES = {
     'Security': ['rls', 'security', 'user', 'permission', 'access', 'username', 'email']
 }
 
-# Maximum allowed folders (flexible - most workbooks need 6-10)
-MAX_FOLDERS = 10
+# Maximum allowed folders
+MAX_FOLDERS = 6
 
 # Lazy comment patterns (fail M3 validation)
 # These are generic comments that don't explain PURPOSE
 LAZY_COMMENT_PATTERNS = [
     # Generic terms
     r'^//\s*(calculated\s+field|calculation|formula|field)\s*$',
-    # Original vague patterns (anchored - only flag if that's ALL the comment says)
-    r'^//\s*(returns?\s+\d+|case\s+statement|date\s+calculation|sum\s+of|if\s+statement)\s*$',
+    # Original vague patterns
+    r'^//\s*(returns?\s+\d|case\s+statement|date\s+calculation|sum\s+of|if\s+statement)',
     # Single short words (1-6 chars)
     r'^//\s*\w{1,6}\s*$',
     # "This/The/A field" type comments
@@ -289,9 +284,11 @@ def validate_folders(root, calculations, result):
                 result.error("F6", field_name, "not found in workbook")
 
     # F7: show-structure='true' in <layout>
-    # (Skipped - Claude will fix this automatically when creating folders)
     if layout is not None:
-        result.passed("F7", "XML", "<layout> check skipped")
+        if layout.get('show-structure') != 'true':
+            result.error("F7", "XML", "<layout> missing show-structure='true'")
+        else:
+            result.passed("F7", "XML", "<layout> has show-structure='true'")
 
     # F8: No unescaped & in folder names
     for folder in folders_in_common:
@@ -306,8 +303,11 @@ def validate_folders(root, calculations, result):
         result.passed("F9", "XML", f"{len(folders_in_common)} folders (max {MAX_FOLDERS})")
 
     # F10: Folder names start with emoji OR HTML entity code (&#x1F4CA; format)
-    # (Relaxed - emoji prefixes are optional, just nice-to-have)
     emoji_pattern = re.compile(r'^([\U0001F300-\U0001F9FF]|&#x[0-9A-Fa-f]+;)')
+    for folder in folders_in_common:
+        folder_name = folder.get('name', '')
+        if not emoji_pattern.match(folder_name):
+            result.error("F10", folder_name, "missing emoji prefix (use &#x1F4CA; format)")
 
     # F11: No duplicate folder names or emojis
     folder_names = []
@@ -406,25 +406,11 @@ def validate_workbook(twb_path, backup_path=None, original_path=None):
         return result
     print(f"  [PASS] X1: valid XML")
 
-    # Get all calculations (deduplicated by name to avoid counting across datasources)
-    all_calcs = list(root.iter('column'))
-    all_calcs = [c for c in all_calcs if c.find('calculation') is not None]
+    # Get all calculations
+    calculations = list(root.iter('column'))
+    calculations = [c for c in calculations if c.find('calculation') is not None]
 
-    # Deduplicate by name - keep first occurrence of each unique field
-    seen_names = set()
-    calculations = []
-    for col in all_calcs:
-        name = col.get('name')
-        if name and name not in seen_names:
-            seen_names.add(name)
-            calculations.append(col)
-
-    # Skip parameters (they don't need comments or folders)
-    # Parameters identified by: [Parameter prefix OR param-domain-type attribute
-    calculations = [c for c in calculations if not c.get('name', '').startswith('[Parameter ')]
-    calculations = [c for c in calculations if c.get('param-domain-type') is None]
-
-    print(f"\nFound {len(calculations)} unique calculated fields (excluding parameters)\n")
+    print(f"\nFound {len(calculations)} calculated fields\n")
 
     # C1-C5: Caption validation
     print("CAPTIONS:")

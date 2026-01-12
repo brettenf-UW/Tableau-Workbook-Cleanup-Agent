@@ -1,5 +1,5 @@
-# Tableau Cleanup Agent - Manual/Scheduled Runner
-# Runs Claude Code in a loop until validation passes (Ralph Wiggum pattern)
+# Tableau Workbook Scrubber - Cleanup Runner
+# Runs Claude Code in a loop until validation passes
 
 param(
     [string]$WorkbookPath,
@@ -7,43 +7,21 @@ param(
     [string]$ScheduleTime,
     [int]$MaxIterations = 10,
     [switch]$DryRun,
-    [switch]$Verbose
+    [switch]$Verbose,
+    [switch]$Standalone  # Run with full banner (not from menu)
 )
 
 $ErrorActionPreference = "Stop"
-$Host.UI.RawUI.WindowTitle = "Tableau Cleanup Agent"
+$Host.UI.RawUI.WindowTitle = "Tableau Workbook Scrubber"
+
+# Import shared UI functions
+. "$PSScriptRoot\lib\ui-helpers.ps1"
 
 # Configuration
 $ConfigDir = Join-Path $env:USERPROFILE ".iw-tableau-cleanup"
 $ConfigFile = Join-Path $ConfigDir "config.json"
 $SkillDir = Join-Path $env:USERPROFILE ".claude\skills\tableau-cleanup"
 $ValidateScript = Join-Path $SkillDir "scripts\validate_cleanup.py"
-
-function Write-Step {
-    param([string]$Message)
-    Write-Host ""
-    Write-Host "  $Message" -ForegroundColor Cyan
-}
-
-function Write-Status {
-    param([string]$Message)
-    Write-Host "    $Message" -ForegroundColor Gray
-}
-
-function Write-Good {
-    param([string]$Message)
-    Write-Host "    [OK] $Message" -ForegroundColor Green
-}
-
-function Write-Bad {
-    param([string]$Message)
-    Write-Host "    [!] $Message" -ForegroundColor Yellow
-}
-
-function Write-Fail {
-    param([string]$Message)
-    Write-Host "    [X] $Message" -ForegroundColor Red
-}
 
 function Write-Log {
     param(
@@ -111,29 +89,7 @@ function Get-ValidationErrors {
     return $result
 }
 
-function Show-ErrorSummary {
-    param($Errors)
-
-    Write-Host ""
-    Write-Host "    Errors Found:" -ForegroundColor Yellow
-
-    $items = @(
-        @{ Name = "Captions"; Count = $Errors.Caption; Desc = "naming issues" },
-        @{ Name = "Comments"; Count = $Errors.Comment; Desc = "missing/bad comments" },
-        @{ Name = "Folders";  Count = $Errors.Folder;  Desc = "organization issues" },
-        @{ Name = "XML";      Count = $Errors.XML;     Desc = "syntax errors" }
-    )
-
-    foreach ($item in $items) {
-        if ($item.Count -gt 0) {
-            Write-Host "      $($item.Name.PadRight(10)) $($item.Count.ToString().PadLeft(3)) ($($item.Desc))" -ForegroundColor Gray
-        }
-    }
-
-    Write-Host "      --------------------" -ForegroundColor DarkGray
-    Write-Host "      Total       $($Errors.Total.ToString().PadLeft(3))" -ForegroundColor White
-    Write-Host ""
-}
+# Note: Show-ErrorSummary replaced by Show-ErrorTable from ui-helpers.ps1
 
 function Get-Configuration {
     if (Test-Path $ConfigFile) {
@@ -234,10 +190,7 @@ function Run-CleanupLoop {
     while ($iteration -lt $MaxIterations) {
         $iteration++
 
-        Write-Host ""
-        Write-Host "  ========================================" -ForegroundColor White
-        Write-Host "  Pass $iteration of $MaxIterations" -ForegroundColor White
-        Write-Host "  ========================================" -ForegroundColor White
+        Show-PassHeader -Current $iteration -Max $MaxIterations
         Write-Log "=== Iteration $iteration of $MaxIterations ===" -LogFile $LogFile
 
         # AUTO-BACKUP and create _cleaned copy on first pass only
@@ -281,7 +234,7 @@ function Run-CleanupLoop {
         $previousErrors = $null
         if (Test-Path $ValidateScript) {
             try {
-                $validateResult = & python $ValidateScript $checkPath 2>&1
+                $validateResult = & python $ValidateScript "$checkPath" 2>&1
                 $validateResult | ForEach-Object { Write-Log "  $_" -LogFile $LogFile }
                 $currentErrors = Get-ValidationErrors -Output $validateResult
 
@@ -292,16 +245,21 @@ function Run-CleanupLoop {
                 $finalErrors = $currentErrors.Total
 
                 if ($currentErrors.Total -eq 0) {
-                    Write-Host ""
-                    Write-Host "  ========================================" -ForegroundColor Green
-                    Write-Host "  DONE! All checks passed!" -ForegroundColor Green
-                    Write-Host "  ========================================" -ForegroundColor Green
-                    Write-Log "Validation passed! Cleanup complete." -LogFile $LogFile
-                    $success = $true
-                    break
+                    if ($iteration -gt 1) {
+                        # Pass 2+: 0 errors means we're done
+                        Show-Success -Title "All Checks Passed!" -Stats @{
+                            "Passes Required" = $iteration
+                        }
+                        Write-Log "Validation passed! Cleanup complete." -LogFile $LogFile
+                        $success = $true
+                        break
+                    } else {
+                        # Pass 1: Still run Claude for thorough review
+                        Write-Good "Validation passed - running thorough review anyway (Pass 1)"
+                    }
                 }
 
-                Show-ErrorSummary -Errors $currentErrors
+                Show-ErrorTable -Errors $currentErrors
                 $previousErrors = $currentErrors
 
             } catch {
@@ -323,45 +281,51 @@ function Run-CleanupLoop {
 
         # IMPORTANT: Prompt uses trigger words that MATCH the Skill description
         # This triggers the Skill AUTOMATICALLY - we don't tell Claude to read files
+        $passInstruction = if ($iteration -eq 1) {
+            "FIRST PASS - Be THOROUGH: Review ALL calculations regardless of error count. Fix missing folders, improve comments, standardize captions. This is your one chance to review everything."
+        } else {
+            "PASS $iteration - Be CONSERVATIVE: Only fix items that STILL have errors from validation. Do NOT touch passing items or reorganize folders."
+        }
+
         $prompt = @"
 Clean up this Tableau workbook by standardizing captions, adding comments, and organizing calculations into folders.
 
 WORKBOOK PATH: $cleanedPath
 
+PASS NUMBER: $iteration of $MaxIterations
+$passInstruction
+
 VALIDATION FOUND $($currentErrors.Total) ERRORS:
 - $errorSummary
 
+FOLDER RULES (CRITICAL):
+- If a calc ALREADY has a valid folder and passes validation, DO NOT move it
+- Calcs can legitimately fit multiple folders (e.g., "% change" calcs relate to both dates AND metrics)
+- For ambiguous calcs: KEEP in current folder unless clearly wrong
+- Only move a calc if it has NO folder or is in an obviously WRONG folder
+- If 5+ similar unfiled calcs exist, you MAY create a new folder (e.g., "Period Comparisons")
+- Max folders: 10 - do not exceed
+
 TWO-LAYER VALIDATION:
 1. SCRIPT validation catches obvious issues (too short, lazy patterns)
-2. YOU must also validate - review ALL comments for quality, even "passing" ones
+2. YOU must also validate - review comments for quality, even "passing" ones
 
-Use batch processing (scripts/batch_comments.py) to process ALL calculations in groups of 10.
+Use batch processing (scripts/batch_comments.py) to process calculations in groups of 10.
 
 FOR EACH CALCULATION:
-1. READ the formula completely to understand what it does
-2. UNDERSTAND its business purpose (KPI tracking? Filtering? Display?)
-3. CHECK the existing comment (if any)
-4. ASK: Would a new team member understand WHY this calc exists?
-5. DECIDE: Add / Revise / Keep based on YOUR judgment + script rules
-
-COMMENT WORKFLOW:
-- NO COMMENT? → Add meaningful comment explaining PURPOSE
-- SCRIPT FLAGGED (M3 error)? → MUST fix - explain PURPOSE
-- SCRIPT PASSED but vague? → YOU should still improve it!
-- GOOD COMMENT (specific, explains why)? → Keep it
+1. READ the formula completely
+2. UNDERSTAND its business purpose
+3. CHECK existing comment (if any)
+4. DECIDE: Add / Revise / Keep based on YOUR judgment + script rules
 
 WHAT MAKES A GOOD COMMENT:
 - Explains WHY this calc exists (not just what it does)
 - Specific to this formula (not generic)
-- Would help a new team member understand the business purpose
 - 15+ characters, not lazy patterns
 
 EXAMPLES:
-BAD (even if passes script): "// This calculation is used for tracking"
+BAD: "// This calculation is used for tracking"
 GOOD: "// Identifies stale accounts needing follow-up for retention"
-
-BAD: "// Returns a value based on the date"
-GOOD: "// Converts fiscal year (July start) for financial reporting alignment"
 
 SAFETY RULES:
 - NEVER change name attributes, only caption
@@ -369,7 +333,7 @@ SAFETY RULES:
 - Keep &#13;&#10; in formulas (valid XML newlines)
 - Edit ONLY the _cleaned file at the path above
 
-Run validation after fixes. Continue until 0 errors AND you've reviewed all calcs.
+Run validation after fixes. Continue until 0 errors.
 "@
 
         # PHASE 2: Ask Claude to fix
@@ -416,16 +380,15 @@ Run validation after fixes. Continue until 0 errors AND you've reviewed all calc
 
         if (Test-Path $ValidateScript) {
             try {
-                $validateResult = & python $ValidateScript $checkPath 2>&1
+                $validateResult = & python $ValidateScript "$checkPath" 2>&1
                 $validateResult | ForEach-Object { Write-Log "  $_" -LogFile $LogFile }
                 $currentErrors = Get-ValidationErrors -Output $validateResult
                 $finalErrors = $currentErrors.Total
 
                 if ($currentErrors.Total -eq 0) {
-                    Write-Host ""
-                    Write-Host "  ========================================" -ForegroundColor Green
-                    Write-Host "  DONE! All checks passed!" -ForegroundColor Green
-                    Write-Host "  ========================================" -ForegroundColor Green
+                    Show-Success -Title "All Checks Passed!" -Stats @{
+                        "Passes Required" = $iteration
+                    }
                     Write-Log "Validation passed! Cleanup complete." -LogFile $LogFile
                     $success = $true
                     break
@@ -436,7 +399,13 @@ Run validation after fixes. Continue until 0 errors AND you've reviewed all calc
                 if ($fixed -gt 0) {
                     Write-Good "$fixed errors fixed this pass"
                 }
-                Show-ErrorSummary -Errors $currentErrors
+                elseif ($fixed -lt 0) {
+                    $increased = [Math]::Abs($fixed)
+                    Write-Fail "REGRESSION: $increased MORE errors than before!"
+                    Write-Status "Claude may have over-reorganized. Consider restoring backup."
+                    Write-Log "ERROR REGRESSION: $increased more errors after Claude's changes" -LogFile $LogFile
+                }
+                Show-ErrorTable -Errors $currentErrors
                 Write-Bad "$($currentErrors.Total) errors remaining - running another pass..."
                 Write-Log "Validation found $($currentErrors.Total) errors, continuing..." -LogFile $LogFile
 
@@ -448,11 +417,7 @@ Run validation after fixes. Continue until 0 errors AND you've reviewed all calc
     }
 
     if (-not $success) {
-        Write-Host ""
-        Write-Host "  ========================================" -ForegroundColor Yellow
-        Write-Host "  Reached max passes ($MaxIterations)" -ForegroundColor Yellow
-        Write-Host "  Some issues may remain - check the log" -ForegroundColor Yellow
-        Write-Host "  ========================================" -ForegroundColor Yellow
+        Show-Failure -Title "Max Passes Reached" -Message "Some issues may remain after $MaxIterations passes"
         Write-Log "Max iterations ($MaxIterations) reached without passing validation" -LogFile $LogFile
     }
 
@@ -466,13 +431,13 @@ Run validation after fixes. Continue until 0 errors AND you've reviewed all calc
     return $success
 }
 
-# Banner
-Write-Host ""
-Write-Host "  ======================================" -ForegroundColor Cyan
-Write-Host "       TABLEAU CLEANUP AGENT" -ForegroundColor Cyan
-Write-Host "  ======================================" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "  Press Ctrl+C to cancel at any time" -ForegroundColor DarkGray
+# Banner - show full banner if running standalone, compact otherwise
+if ($Standalone) {
+    Show-Banner
+} else {
+    Show-Banner -Compact
+}
+Write-Host "    Press Ctrl+C to cancel at any time" -ForegroundColor DarkGray
 Write-Host ""
 
 # Check if Claude is installed
@@ -604,24 +569,28 @@ foreach ($folder in $foldersToProcess) {
 }
 
 # Final summary
-Write-Host ""
-Write-Host "  ======================================" -ForegroundColor Cyan
-Write-Host "           CLEANUP COMPLETE" -ForegroundColor Cyan
-Write-Host "  ======================================" -ForegroundColor Cyan
-Write-Host ""
+$stats = [ordered]@{}
+if ($successCount -gt 0) { $stats["Cleaned"] = "$successCount workbook(s)" }
+if ($failCount -gt 0) { $stats["Failed"] = "$failCount workbook(s)" }
+if ($skippedCount -gt 0) { $stats["Skipped"] = "$skippedCount folder(s)" }
 
-if ($successCount -gt 0) {
-    Write-Host "    Cleaned:  $successCount workbook(s)" -ForegroundColor Green
-}
-if ($failCount -gt 0) {
-    Write-Host "    Failed:   $failCount workbook(s)" -ForegroundColor Red
-}
-if ($skippedCount -gt 0) {
-    Write-Host "    Skipped:  $skippedCount folder(s)" -ForegroundColor Yellow
+if ($failCount -eq 0 -and $successCount -gt 0) {
+    Show-Success -Title "Cleanup Complete" -Stats $stats
+} else {
+    Write-Header "Cleanup Complete"
+    foreach ($key in $stats.Keys) {
+        $color = switch ($key) {
+            "Cleaned" { $Colors.Success }
+            "Failed" { $Colors.Error }
+            "Skipped" { $Colors.Warning }
+        }
+        Write-Host "      $($key):".PadRight(12) -NoNewline -ForegroundColor $Colors.Dim
+        Write-Host $stats[$key] -ForegroundColor $color
+    }
 }
 
 Write-Host ""
-Write-Host "  Log: $logFile" -ForegroundColor DarkGray
+Write-Status "Log: $logFile"
 Write-Host ""
 
 Write-Log "=== Completed: $successCount success, $failCount failed, $skippedCount skipped ===" -LogFile $logFile

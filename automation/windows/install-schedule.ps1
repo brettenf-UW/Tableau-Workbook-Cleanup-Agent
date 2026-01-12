@@ -1,4 +1,4 @@
-# Tableau Cleanup Agent - Task Scheduler Installation
+# Tableau Workbook Scrubber - Task Scheduler Installation
 # Creates Windows Scheduled Tasks for each unique schedule time
 
 param(
@@ -9,8 +9,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Import shared UI functions
+. "$PSScriptRoot\lib\ui-helpers.ps1"
+
 # Configuration
-$TaskNamePrefix = "TableauCleanupAgent"
+$TaskNamePrefix = "TableauWorkbookScrubber"
 $TaskDescription = "Tableau workbook cleanup using Claude Code"
 $ConfigDir = Join-Path $env:USERPROFILE ".iw-tableau-cleanup"
 $ConfigFile = Join-Path $ConfigDir "config.json"
@@ -76,33 +79,37 @@ function Uninstall-AllTasks {
     if ($tasks) {
         foreach ($task in $tasks) {
             Unregister-ScheduledTask -TaskName $task.TaskName -Confirm:$false
-            Write-Host "Removed: $($task.TaskName)" -ForegroundColor Green
+            Write-Good "Removed: $($task.TaskName)"
         }
-        Write-Host ""
-        Write-Host "All scheduled tasks removed." -ForegroundColor Green
+        Show-Success -Title "Tasks Removed" -Stats @{
+            "Removed" = $tasks.Count
+        }
     } else {
-        Write-Host "No scheduled tasks found." -ForegroundColor Yellow
+        Write-Bad "No scheduled tasks found"
     }
 }
 
 function Show-TaskList {
     $tasks = Get-ExistingTasks
 
-    Write-Host ""
-    Write-Host "Existing Scheduled Tasks:" -ForegroundColor Cyan
-    Write-Host "=========================" -ForegroundColor Cyan
+    Write-Header "Scheduled Tasks"
 
     if (-not $tasks) {
-        Write-Host "  (none)" -ForegroundColor Gray
+        Write-Status "(no scheduled tasks)"
         return
     }
+
+    Write-Host ""
+    Write-Host "    +-------------------------------+-------+----------+" -ForegroundColor $Colors.Dim
+    Write-Host "    | Task Name                     | Time  | Status   |" -ForegroundColor $Colors.Body
+    Write-Host "    +-------------------------------+-------+----------+" -ForegroundColor $Colors.Dim
 
     foreach ($task in $tasks) {
         $trigger = $task.Triggers | Select-Object -First 1
         $time = if ($trigger.StartBoundary) {
             [datetime]::Parse($trigger.StartBoundary).ToString("HH:mm")
         } else {
-            "unknown"
+            "??:??"
         }
 
         $status = switch ($task.State) {
@@ -112,62 +119,144 @@ function Show-TaskList {
             default { $task.State }
         }
         $statusColor = switch ($task.State) {
-            "Ready" { "Green" }
-            "Running" { "Cyan" }
-            "Disabled" { "DarkGray" }
-            default { "Yellow" }
+            "Ready" { $Colors.Success }
+            "Running" { $Colors.LightBlue }
+            "Disabled" { $Colors.Dim }
+            default { $Colors.Warning }
         }
 
-        Write-Host ""
-        Write-Host "  $($task.TaskName)" -ForegroundColor White
-        Write-Host "    Time:   $time daily" -ForegroundColor Gray
-        Write-Host "    Status: " -NoNewline; Write-Host $status -ForegroundColor $statusColor
+        $taskName = if ($task.TaskName.Length -gt 29) { $task.TaskName.Substring(0, 26) + "..." } else { $task.TaskName }
+        Write-Host "    | $($taskName.PadRight(29)) | $time | " -NoNewline -ForegroundColor $Colors.Dim
+        Write-Host $status.PadRight(8) -NoNewline -ForegroundColor $statusColor
+        Write-Host " |" -ForegroundColor $Colors.Dim
     }
+
+    Write-Host "    +-------------------------------+-------+----------+" -ForegroundColor $Colors.Dim
     Write-Host ""
 }
 
 # Banner
-Write-Host ""
-Write-Host "======================================" -ForegroundColor Cyan
-Write-Host "  Tableau Cleanup Agent - Scheduler" -ForegroundColor Cyan
-Write-Host "======================================" -ForegroundColor Cyan
-Write-Host ""
+Show-Banner -Compact
 
-# Handle list command
+# Handle list command (direct arg)
 if ($List) {
     Show-TaskList
     exit 0
 }
 
-# Handle uninstall
+# Handle uninstall (direct arg)
 if ($Uninstall) {
     Uninstall-AllTasks
     exit 0
 }
 
-# Check for admin privileges
-if (-not (Test-AdminPrivileges)) {
-    Write-Host "Warning: Running without admin privileges." -ForegroundColor Yellow
-    Write-Host "Tasks will run only when you are logged in." -ForegroundColor Yellow
-    Write-Host ""
-}
-
-# Load configuration
+# Load configuration first
 $config = Get-Configuration
 
 if (-not $config) {
-    Write-Host "Error: No configuration found. Run configure.ps1 first." -ForegroundColor Red
+    Write-Fail "No configuration found. Run 'tableau-scrubber' and select Configure first."
     exit 1
 }
 
+# Interactive menu
+function Show-ScheduleMenu {
+    $existingTasks = Get-ExistingTasks
+    $schedules = Get-UniqueSchedules -Config $config
+
+    Write-Header "Schedule Management"
+
+    # Show current status
+    if ($existingTasks -and $existingTasks.Count -gt 0) {
+        Write-Step "Current scheduled tasks:"
+        Write-Host ""
+        Write-Host "    +---------------------------+-------+----------+" -ForegroundColor $Colors.Dim
+        Write-Host "    | Task                      | Time  | Status   |" -ForegroundColor $Colors.Body
+        Write-Host "    +---------------------------+-------+----------+" -ForegroundColor $Colors.Dim
+
+        foreach ($task in $existingTasks) {
+            $trigger = $task.Triggers | Select-Object -First 1
+            $time = if ($trigger.StartBoundary) {
+                [datetime]::Parse($trigger.StartBoundary).ToString("HH:mm")
+            } else { "??:??" }
+
+            $status = switch ($task.State) {
+                "Ready" { "Ready" }
+                "Running" { "Running" }
+                "Disabled" { "Off" }
+                default { $task.State }
+            }
+            $statusColor = switch ($task.State) {
+                "Ready" { $Colors.Success }
+                "Running" { $Colors.LightBlue }
+                default { $Colors.Dim }
+            }
+
+            $taskName = if ($task.TaskName.Length -gt 25) { $task.TaskName.Substring(0, 22) + "..." } else { $task.TaskName }
+            Write-Host "    | $($taskName.PadRight(25)) | $time | " -NoNewline -ForegroundColor $Colors.Dim
+            Write-Host $status.PadRight(8) -NoNewline -ForegroundColor $statusColor
+            Write-Host " |" -ForegroundColor $Colors.Dim
+        }
+        Write-Host "    +---------------------------+-------+----------+" -ForegroundColor $Colors.Dim
+    } else {
+        Write-Status "No scheduled tasks configured yet."
+    }
+
+    Write-Host ""
+
+    # Show configured folder schedules
+    if ($schedules.Count -gt 0) {
+        Write-Step "Folder schedules (from config):"
+        foreach ($time in $schedules.Keys) {
+            $folders = $schedules[$time] -join ", "
+            Write-Status "$time - $folders"
+        }
+    }
+
+    Show-MenuBox -Title "Schedule Options" -Options @(
+        @{ Key = "1"; Label = "Create/Update"; Desc = "Apply folder schedules" }
+        @{ Key = "2"; Label = "Remove All"; Desc = "Delete all tasks" }
+        @{ Key = "3"; Label = "Back"; Desc = "Return to main menu" }
+    )
+
+    return Get-UserChoice -Prompt "Select [1-3]:"
+}
+
+# Run interactive menu
+$menuChoice = Show-ScheduleMenu
+
+switch ($menuChoice) {
+    "1" {
+        # Create/Update schedules
+    }
+    "2" {
+        Uninstall-AllTasks
+        exit 0
+    }
+    "3" {
+        exit 0
+    }
+    default {
+        Write-Bad "Invalid selection"
+        exit 0
+    }
+}
+
+# Continue with schedule creation (option 1)
 if ($config.folders.Count -eq 0) {
-    Write-Host "Error: No folders configured. Run configure.ps1 first." -ForegroundColor Red
+    Write-Fail "No folders configured. Run 'tableau-scrubber' and select Configure first."
     exit 1
+}
+
+# Check for admin privileges
+if (-not (Test-AdminPrivileges)) {
+    Write-Bad "Running without admin privileges"
+    Write-Status "Tasks will run only when you are logged in"
+    Write-Host ""
 }
 
 # Check if script exists
 if (-not (Test-Path $ScriptPath)) {
-    Write-Host "Error: run-cleanup.ps1 not found at: $ScriptPath" -ForegroundColor Red
+    Write-Fail "run-cleanup.ps1 not found at: $ScriptPath"
     exit 1
 }
 
@@ -175,43 +264,31 @@ if (-not (Test-Path $ScriptPath)) {
 $schedules = Get-UniqueSchedules -Config $config
 
 if ($schedules.Count -eq 0) {
-    Write-Host "No enabled folders found." -ForegroundColor Yellow
+    Write-Bad "No enabled folders found"
     exit 0
 }
 
-Write-Host "Schedule Summary:" -ForegroundColor White
+Write-Header "Creating Schedules"
 foreach ($time in $schedules.Keys) {
     $folders = $schedules[$time] -join ", "
-    Write-Host "  $time - $folders" -ForegroundColor Gray
+    Write-Status "$time daily - $folders"
 }
 Write-Host ""
 
-# Check for existing tasks
+# Check for existing tasks - remove silently if updating
 $existingTasks = Get-ExistingTasks
 
 if ($existingTasks -and -not $Force) {
-    Write-Host "Existing scheduled tasks found:" -ForegroundColor Yellow
-    foreach ($task in $existingTasks) {
-        Write-Host "  - $($task.TaskName)" -ForegroundColor Gray
-    }
-    Write-Host ""
-    $overwrite = Read-Host "Remove and recreate all tasks? (y/N)"
-
-    if ($overwrite -ne "y" -and $overwrite -ne "Y") {
-        Write-Host "Installation cancelled." -ForegroundColor Yellow
-        exit 0
-    }
-
-    # Remove existing tasks
+    Write-Step "Updating existing tasks..."
     foreach ($task in $existingTasks) {
         Unregister-ScheduledTask -TaskName $task.TaskName -Confirm:$false
     }
-    Write-Host "Existing tasks removed." -ForegroundColor Green
+    Write-Good "Old tasks removed"
     Write-Host ""
 }
 
 # Create tasks for each unique schedule
-Write-Host "Creating scheduled tasks..." -ForegroundColor White
+Write-Step "Creating scheduled tasks..."
 $createdCount = 0
 
 foreach ($time in $schedules.Keys) {
@@ -242,32 +319,20 @@ foreach ($time in $schedules.Keys) {
         # Register the task
         Register-ScheduledTask -TaskName $taskName -Description $desc -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
 
-        Write-Host "  Created: $taskName ($time)" -ForegroundColor Green
+        Write-Good "Created: $taskName ($time)"
         $createdCount++
 
     } catch {
-        Write-Host "  Error creating task for $time`: $_" -ForegroundColor Red
+        Write-Fail "Error creating task for $time`: $_"
     }
 }
 
-Write-Host ""
-Write-Host "======================================" -ForegroundColor Green
-Write-Host "  $createdCount Scheduled Task(s) Created!" -ForegroundColor Green
-Write-Host "======================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "Commands:" -ForegroundColor Yellow
-Write-Host "  View tasks:   .\install-schedule.ps1 -List" -ForegroundColor Gray
-Write-Host "  Uninstall:    .\install-schedule.ps1 -Uninstall" -ForegroundColor Gray
-Write-Host "  Run now:      .\run-cleanup.ps1" -ForegroundColor Gray
-Write-Host ""
-
-# Offer to run now
-$runNow = Read-Host "Run cleanup now to test? (y/N)"
-
-if ($runNow -eq "y" -or $runNow -eq "Y") {
-    Write-Host ""
-    Write-Host "Starting cleanup..." -ForegroundColor Cyan
-    & $ScriptPath
+Show-Success -Title "Scheduled Tasks Created" -Stats @{
+    "Tasks Created" = $createdCount
+    "Run Time" = ($schedules.Keys | Sort-Object) -join ", "
 }
 
+Write-Host ""
+Write-Info "View:    tableau-scrubber -Action schedule -List"
+Write-Info "Remove:  tableau-scrubber -Action schedule -Uninstall"
 Write-Host ""
