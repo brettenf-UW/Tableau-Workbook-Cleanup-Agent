@@ -23,6 +23,11 @@ $ConfigFile = Join-Path $ConfigDir "config.json"
 $SkillDir = Join-Path $env:USERPROFILE ".claude\skills\tableau-cleanup"
 $ValidateScript = Join-Path $SkillDir "scripts\validate_cleanup.py"
 
+# Cost control settings (Sonnet 4.5: ~$3/M input, ~$15/M output)
+$ClaudeModel = "sonnet"           # Use Sonnet 4.5
+$MaxClaudeTurns = 30              # Limit API calls (~$2-4 per run)
+$MaxOutputTokens = 8000           # Limit output per response
+
 function Write-Log {
     param(
         [string]$Message,
@@ -273,18 +278,32 @@ function Run-CleanupLoop {
 
         # Build error summary for the prompt (now we have actual $currentErrors)
         $errorList = @()
-        if ($currentErrors.Caption -gt 0) { $errorList += "$($currentErrors.Caption) caption errors (naming issues)" }
-        if ($currentErrors.Comment -gt 0) { $errorList += "$($currentErrors.Comment) comment errors (missing/lazy comments)" }
-        if ($currentErrors.Folder -gt 0) { $errorList += "$($currentErrors.Folder) folder errors (organization)" }
-        if ($currentErrors.XML -gt 0) { $errorList += "$($currentErrors.XML) XML errors (syntax)" }
-        $errorSummary = if ($errorList.Count -gt 0) { $errorList -join "`n- " } else { "Check validation output above" }
+        if ($currentErrors.Caption -gt 0) { $errorList += "$($currentErrors.Caption) caption errors" }
+        if ($currentErrors.Comment -gt 0) { $errorList += "$($currentErrors.Comment) comment errors" }
+        if ($currentErrors.Folder -gt 0) { $errorList += "$($currentErrors.Folder) folder errors" }
+        if ($currentErrors.XML -gt 0) { $errorList += "$($currentErrors.XML) XML errors" }
+        $errorSummary = if ($errorList.Count -gt 0) { $errorList -join ", " } else { "none detected" }
+
+        # Extract ACTUAL error details so Claude knows exactly what to fix (first 100 lines)
+        $errorDetails = $validateResult | Where-Object { $_ -match '\[ERROR\]' } | Select-Object -First 100
+        $errorDetailsText = if ($errorDetails.Count -gt 0) {
+            ($errorDetails -join "`n")
+        } else {
+            "(no error details captured)"
+        }
 
         # IMPORTANT: Prompt uses trigger words that MATCH the Skill description
         # This triggers the Skill AUTOMATICALLY - we don't tell Claude to read files
         $passInstruction = if ($iteration -eq 1) {
-            "FIRST PASS - Be THOROUGH: Review ALL calculations regardless of error count. Fix missing folders, improve comments, standardize captions. This is your one chance to review everything."
+@"
+FIRST PASS - BE EXTREMELY THOROUGH:
+- You MUST fix ALL $($currentErrors.Total) errors listed below
+- Review EVERY calculation, even ones without errors
+- This is your ONE CHANCE for comprehensive review
+- Do NOT stop until all errors are addressed
+"@
         } else {
-            "PASS $iteration - Be CONSERVATIVE: Only fix items that STILL have errors from validation. Do NOT touch passing items or reorganize folders."
+            "PASS $iteration - Be CONSERVATIVE: Only fix items that STILL have errors. Do NOT touch passing items."
         }
 
         $prompt = @"
@@ -295,16 +314,19 @@ WORKBOOK PATH: $cleanedPath
 PASS NUMBER: $iteration of $MaxIterations
 $passInstruction
 
-VALIDATION FOUND $($currentErrors.Total) ERRORS:
-- $errorSummary
+=== VALIDATION FOUND $($currentErrors.Total) ERRORS ===
+Summary: $errorSummary
 
-FOLDER RULES (CRITICAL):
-- If a calc ALREADY has a valid folder and passes validation, DO NOT move it
-- Calcs can legitimately fit multiple folders (e.g., "% change" calcs relate to both dates AND metrics)
-- For ambiguous calcs: KEEP in current folder unless clearly wrong
-- Only move a calc if it has NO folder or is in an obviously WRONG folder
-- If 5+ similar unfiled calcs exist, you MAY create a new folder (e.g., "Period Comparisons")
-- Max folders: 10 - do not exceed
+SPECIFIC ERRORS TO FIX:
+$errorDetailsText
+
+=== END OF ERRORS ===
+
+FOLDER RULES:
+- If a calc ALREADY has a valid folder, DO NOT move it
+- Ambiguous calcs: KEEP in current folder unless clearly wrong
+- Only move calcs with NO folder or obviously WRONG folder
+- Max folders: 10
 
 TWO-LAYER VALIDATION:
 1. SCRIPT validation catches obvious issues (too short, lazy patterns)
@@ -312,20 +334,11 @@ TWO-LAYER VALIDATION:
 
 Use batch processing (scripts/batch_comments.py) to process calculations in groups of 10.
 
-FOR EACH CALCULATION:
-1. READ the formula completely
-2. UNDERSTAND its business purpose
-3. CHECK existing comment (if any)
-4. DECIDE: Add / Revise / Keep based on YOUR judgment + script rules
-
-WHAT MAKES A GOOD COMMENT:
-- Explains WHY this calc exists (not just what it does)
-- Specific to this formula (not generic)
-- 15+ characters, not lazy patterns
-
-EXAMPLES:
-BAD: "// This calculation is used for tracking"
-GOOD: "// Identifies stale accounts needing follow-up for retention"
+COMMENT RULES:
+- Must explain WHY the calc exists (not just what it does)
+- 15+ characters, specific to this formula
+- BAD: "// This calculation is used for tracking"
+- GOOD: "// Identifies stale accounts needing follow-up for retention"
 
 SAFETY RULES:
 - NEVER change name attributes, only caption
@@ -333,7 +346,7 @@ SAFETY RULES:
 - Keep &#13;&#10; in formulas (valid XML newlines)
 - Edit ONLY the _cleaned file at the path above
 
-Run validation after fixes. Continue until 0 errors.
+Fix ALL errors above. Run validation when done.
 "@
 
         # PHASE 2: Ask Claude to fix
@@ -354,9 +367,12 @@ Run validation after fixes. Continue until 0 errors.
                 "Bash(python:*)"
             ) -join ","
 
+            # Set token limit for cost control
+            $env:CLAUDE_CODE_MAX_OUTPUT_TOKENS = $MaxOutputTokens
+
             Write-Host ""
-            Write-Host "    --- Claude Output ---" -ForegroundColor DarkCyan
-            $result = & claude -p $prompt --allowedTools $allowedTools 2>&1 | ForEach-Object {
+            Write-Host "    --- Claude Output (Sonnet 4.5, max $MaxClaudeTurns turns) ---" -ForegroundColor DarkCyan
+            $result = & claude -p $prompt --model $ClaudeModel --max-turns $MaxClaudeTurns --allowedTools $allowedTools 2>&1 | ForEach-Object {
                 Write-Host "    $_" -ForegroundColor DarkGray
                 Write-Log "  $_" -LogFile $LogFile
                 $_  # Pass through for capture
@@ -366,6 +382,14 @@ Run validation after fixes. Continue until 0 errors.
 
             $endTime = Get-Date
             $duration = $endTime - $startTime
+
+            # Check if turn limit was hit
+            $resultText = $result -join " "
+            if ($resultText -match "max.*turn|turn.*limit|limit.*reached") {
+                Write-Fail "COST LIMIT: Max turns ($MaxClaudeTurns) reached"
+                Write-Status "Some fixes may not have been applied. Increase `$MaxClaudeTurns if needed."
+                Write-Log "WARNING: Max turns limit reached" -LogFile $LogFile
+            }
 
             Write-Good "Claude finished ($($duration.TotalMinutes.ToString('F1')) min)"
 

@@ -1,90 +1,87 @@
 # Tableau Cleanup Agent
 
-An automated tool for cleaning up Tableau workbooks. Includes a Claude Code skill for AI-powered fixes, Python validation scripts, and PowerShell orchestration for batch processing.
+An automated tool for cleaning up Tableau workbooks. Uses Claude AI to standardize captions, add meaningful comments, and organize calculations. Works on **Windows** and **Mac/Linux** (beta).
 
 **What it does:**
 - Standardizes calculation captions (Title Case, no prefixes)
 - Adds meaningful comments explaining the PURPOSE of each calculation
-- Organizes calculations into 6 standard folders
+- Organizes calculations into logical folders
 - Validates against 27 quality rules
 - Runs iteratively until all errors are fixed
 
-## Get started
+## Quick Start
 
 ### Prerequisites
 
 | Requirement | Installation |
 |-------------|--------------|
 | Python 3.x | [python.org/downloads](https://www.python.org/downloads/) |
-| Claude Code | [github.com/anthropics/claude-code](https://github.com/anthropics/claude-code) |
+| Claude Code | [claude.ai/code](https://claude.ai/code) |
+| jq (Mac only) | `brew install jq` |
 
-### Install the skill
+### Installation
 
-**Windows (Command Prompt)**
+**Windows**
 ```cmd
-install-tableau-skill.bat
+cd automation\windows
+setup.bat
 ```
 
-**Windows (PowerShell)**
-```powershell
-.\install-tableau-skill.ps1
-```
-
-**macOS / Linux**
+**Mac / Linux** *(Beta)*
 ```bash
-chmod +x install-tableau-skill.sh
-./install-tableau-skill.sh
+cd automation/mac
+chmod +x install.sh
+./install.sh
 ```
 
-This copies the skill files to `~/.claude/skills/tableau-cleanup/`
+*Mac/Linux support is in beta. Report issues to bretten.farrell@interworks.com*
 
-### Configure watch folders
-
-```bash
-tableau-setup
-```
-
-This opens an interactive menu to add folders containing your Tableau workbooks.
+This installs:
+- Claude skill files to `~/.claude/skills/tableau-cleanup/`
+- `tableau-scrubber` command (optional, added to PATH)
 
 ## Usage
 
-### Automated cleanup
+### Interactive Mode
 
 ```bash
-tableau-clean
+tableau-scrubber
 ```
 
-This will:
-1. Find the latest workbook in each configured folder
-2. Create a backup
-3. Create a `*_cleaned.twb` working copy
-4. Run validation and fix errors iteratively until complete
+This opens a menu to:
+1. **Clean Workbooks** - Run cleanup on configured folders
+2. **Configure Folders** - Add/edit/remove watch folders
+3. **View Logs** - Check recent cleanup history
 
-### Manual cleanup
+### Command Line Mode
+
+```bash
+# Clean all configured folders
+tableau-scrubber --action clean
+
+# Clean a specific workbook
+tableau-scrubber --action clean --workbook "/path/to/workbook.twb"
+
+# View logs
+tableau-scrubber --action logs
+```
+
+### Manual Cleanup (Claude Direct)
 
 You can also invoke the skill directly in Claude Code:
 
 ```
-Clean up this Tableau workbook: C:\path\to\workbook.twb
+Clean up this Tableau workbook: /path/to/workbook.twb
 ```
 
-## What it does
-
-| Feature | Description |
-|---------|-------------|
-| **Captions** | Removes `c_` prefixes, converts to Title Case, preserves acronyms |
-| **Comments** | Adds purpose-driven comments explaining WHY each calculation exists |
-| **Folders** | Organizes into 6 categories: Metrics, Dates, Filters, Display, Projections, Security |
-| **Validation** | Catches lazy comments, ensures proper XML encoding |
-
-## How it works
+## How It Works
 
 ```
-tableau-clean
+tableau-scrubber
      │
-     ├── Find latest workbook
-     ├── Create backup
-     ├── Create _cleaned copy
+     ├── Find latest workbook in folder
+     ├── Create backup (timestamped)
+     ├── Create _cleaned.twb working copy
      │
      └── Loop until 0 errors:
          ├── validate_cleanup.py (27 rules)
@@ -92,11 +89,22 @@ tableau-clean
          └── Re-validate
 ```
 
-The system uses two-layer validation:
-1. **Script validation** catches obvious issues (length, lazy patterns)
-2. **Claude validation** reviews all comments for quality and purpose
+**Two-layer validation:**
+1. **Script validation** - Catches obvious issues (length, lazy patterns)
+2. **Claude validation** - Reviews all comments for quality and purpose
 
-## Validation rules
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| **Captions** | Removes `c_` prefixes, converts to Title Case, preserves acronyms |
+| **Comments** | Adds purpose-driven comments explaining WHY each calculation exists |
+| **Folders** | Organizes into categories: Metrics, Dates, Filters, Display, etc. |
+| **Validation** | 27 rules catching lazy comments, XML errors, organization issues |
+| **Backups** | Automatic timestamped backups before any changes |
+| **Logging** | Full logs with preview feature to see Claude's work |
+
+## Validation Rules
 
 ### Captions (C1-C5)
 - Title Case with spaces
@@ -110,33 +118,41 @@ The system uses two-layer validation:
 - No lazy patterns ("Calculated field", "Sum", etc.)
 
 ### Folders (F1-F11)
-- Maximum 6 folders
-- Required categories: Metrics, Dates, Filters, Display, Projections, Security
-- All calculations must be assigned
+- Maximum 10 folders
+- All calculations must be assigned to a folder
+- Ambiguous calcs stay in current folder if valid
 
-## Project structure
+## Project Structure
 
 ```
 Tableau Cleanup Agent/
 │
-├── install-tableau-skill.bat      # Windows installer (CMD)
-├── install-tableau-skill.ps1      # Windows installer (PowerShell)
-├── install-tableau-skill.sh       # macOS/Linux installer
+├── automation/
+│   ├── windows/                    # Windows scripts
+│   │   ├── tableau-scrubber.ps1    # Main CLI entry point
+│   │   ├── run-cleanup.ps1         # Cleanup loop (validate → fix → repeat)
+│   │   ├── configure.ps1           # Folder configuration
+│   │   ├── setup.bat               # Windows installer
+│   │   └── lib/ui-helpers.ps1      # Shared UI functions
+│   │
+│   └── mac/                        # Mac/Linux scripts
+│       ├── tableau-scrubber.sh     # Main CLI entry point
+│       ├── run-cleanup.sh          # Cleanup loop
+│       ├── configure.sh            # Folder configuration
+│       ├── install.sh              # Mac installer
+│       └── lib/ui-helpers.sh       # Shared UI functions
 │
-├── claude-skill/                  # Claude Code skill (installed to ~/.claude/skills/)
-│   ├── SKILL.md                   # AI instructions for cleanup
-│   ├── scripts/                   # Python validation & batch processing
-│   │   ├── validate_cleanup.py    # 27-rule validator
-│   │   ├── batch_comments.py      # Processes calcs in groups of 10
-│   │   └── ...                    # Backup, extract, repackage utilities
-│   └── resources/                 # Reference guides for Claude
-│       ├── comment-guide.md       # How to write good comments
-│       └── good-comments.md       # 50+ example comments
+├── claude-skill/                   # Claude Code skill
+│   ├── SKILL.md                    # AI instructions for cleanup
+│   ├── scripts/
+│   │   ├── validate_cleanup.py     # 27-rule validator
+│   │   ├── batch_comments.py       # Batch processor
+│   │   └── ...
+│   └── resources/
+│       ├── comment-guide.md        # How to write good comments
+│       └── good-comments.md        # 50+ example comments
 │
-└── automation/                    # PowerShell orchestration
-    └── windows/
-        ├── run-cleanup.ps1        # Main cleanup loop (validate → fix → repeat)
-        └── configure.ps1          # Watch folder configuration
+└── README.md
 ```
 
 ## Troubleshooting
@@ -144,14 +160,20 @@ Tableau Cleanup Agent/
 | Issue | Solution |
 |-------|----------|
 | Python not found | Install from [python.org](https://www.python.org/downloads/) |
+| jq not found (Mac) | `brew install jq` |
+| Claude not found | Install from [claude.ai/code](https://claude.ai/code) |
 | Validation script not found | Re-run the install script |
-| No folders configured | Run `tableau-setup` |
+| No folders configured | Run `tableau-scrubber` → Configure Folders |
 
 ## Contributing
 
 1. Edit files in `claude-skill/` directory
 2. Run the install script to deploy changes
-3. Test with `tableau-clean`
+3. Test with `tableau-scrubber`
+
+## Support
+
+Found a bug or have a feature request? Contact **bretten.farrell@interworks.com**
 
 ## License
 
