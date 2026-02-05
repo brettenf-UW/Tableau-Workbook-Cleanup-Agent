@@ -20,9 +20,9 @@ This project installs **two components globally**:
 ├─────────────────────────────┼───────────────────────────────┤
 │ • Fully automated           │ • Use in any Claude Code chat │
 │ • Runs validation loop      │ • Just mention "Tableau"      │
-│ • Finds latest workbook     │ • Claude knows the 27 rules   │
+│ • Finds latest workbook     │                               │
 │ • Creates backups           │ • Manual control over edits   │
-│ • Multiple passes until 0   │ • Great for one-off cleanups  │
+│ • Multiple passes until 0   │                               │
 └─────────────────────────────┴───────────────────────────────┘
 ```
 
