@@ -18,11 +18,11 @@ This project installs **two components globally**:
 │      CLI TOOL               │      SKILL FILES              │
 │      (tableau-scrubber)     │      (auto-activates)         │
 ├─────────────────────────────┼───────────────────────────────┤
-│ • Fully automated           │ • Use in any Claude Code chat │
-│ • Runs validation loop      │ • Just mention "Tableau"      │
-│ • Finds latest workbook     │                               │
-│ • Creates backups           │ • Manual control over edits   │
-│ • Multiple passes until 0   │                               │
+│ • Fully automated           │ • Activates in Claude Code    │
+│ • Runs validation loop      │ • Explore workbook structure  │
+│ • Finds latest workbook     │ • Create synthetic data       │
+│ • Creates backups           │ • Suggest calcs for visuals   │
+│ • Multiple passes until 0   │ • Edit .twb/.twbx directly    │
 └─────────────────────────────┴───────────────────────────────┘
 ```
 
